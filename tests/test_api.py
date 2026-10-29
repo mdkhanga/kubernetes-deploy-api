@@ -107,6 +107,28 @@ def test_create_invalid_returns_400_with_field_details(api):
     assert all(not d["message"].startswith("Value error") for d in err["details"])
 
 
+@pytest.mark.parametrize("case, body, field", [
+    ("bad image string", {"name": "web", "image": "nginx latest"}, "image"),
+    ("bad image: uppercase", {"name": "web", "image": "Nginx:1.27"}, "image"),
+    ("bad image: empty tag", {"name": "web", "image": "nginx:"}, "image"),
+    ("negative replicas", {"name": "web", "image": "nginx", "replicas": -1}, "replicas"),
+    ("missing name", {"image": "nginx"}, "name"),
+    ("missing image", {"name": "web"}, "image"),
+    ("name with invalid characters", {"name": "web_app!", "image": "nginx"}, "name"),
+    ("name with uppercase", {"name": "Web", "image": "nginx"}, "name"),
+    ("namespace with invalid characters", {"name": "web", "image": "nginx", "namespace": "my_ns"}, "namespace"),
+    ("invalid resource value", {"name": "web", "image": "nginx", "resources": {"limits": {"cpu": "lots"}}},
+     "resources.limits.cpu"),
+])
+def test_invalid_create_requests_are_rejected_with_400(api, gateway, case, body, field):
+    r = api.post("/api/deployments", json=body)
+    assert r.status_code == 400, case
+    err = r.json()["error"]
+    assert err["code"] == "INVALID_INPUT"
+    assert field in {d["field"] for d in err["details"]}, case
+    assert gateway.deployments == {}  # nothing reached the cluster
+
+
 def test_create_malformed_json_returns_400(api):
     r = api.post("/api/deployments", content="{not json", headers={"Content-Type": "application/json"})
     assert r.status_code == 400

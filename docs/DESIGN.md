@@ -57,6 +57,9 @@ reads it live.
 | 25 | **CLI `--watch` refreshes every 5s** (Rich Live) on `list` and `status` | Spec's auto-refresh requirement, applied to the CLI | Manual re-run |
 | 26 | **CLI exit codes: 0 ok, 1 API error/not found, 2 usage error/unreachable**; API errors printed with code and field details | Scriptable (smoke test) and readable | Always 1 |
 | 27 | **CLI tests use `httpx.MockTransport`** | Exercise real request bodies and output without a server | Mocking the Api class |
+| 28 | **Integration tests in pytest (`-m integration`), not a shell smoke script** | Real assertions and pass/fail counts; same tooling as unit tests; excluded from the default fast run | Bash + curl smoke script |
+| 29 | **Integration tests run the app in-process** (TestClient + real KubernetesGateway) | Full HTTP → service → Kubernetes path without managing a server process | Starting uvicorn in a fixture |
+| 30 | **One throwaway namespace per run, deleted at the end; `wait_for` polling** | Isolation from real workloads; Kubernetes is eventually consistent, so tests poll with timeouts instead of sleeping fixed times | Shared namespace; fixed sleeps |
 
 ## Health rules (first match wins)
 

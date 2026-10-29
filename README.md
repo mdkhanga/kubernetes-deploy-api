@@ -290,10 +290,24 @@ Unknown fields are rejected.
 ## Tests
 
 ```bash
-pytest -v
+pytest -v                    # unit tests: no cluster needed (~1s)
+pytest -m integration -v     # integration tests: real cluster from your kubeconfig (~1-2 min)
 ```
 
-Tests run without a cluster: an in-memory fake replaces the Kubernetes gateway.
+**Integration tests** (`tests/integration/`) send real HTTP requests through the app
+(in-process, no server needed) to the real cluster, in a throwaway namespace
+`deploy-api-it-<random>` that is deleted afterwards. They cover:
+
+| Test | Checks |
+| --- | --- |
+| `test_deployment_lifecycle` | create (namespace auto-created) → in list (with/without filter) → HEALTHY with Running pods → scale 2→3 → 3 ready, also in Kubernetes → delete → 404, gone from Kubernetes, pods gone |
+| `test_bad_image_is_reported_as_failing` | `nginx:nonexistent` → FAILING at deployment level; pod Pending, container waiting on ImagePullBackOff/ErrImagePull |
+| `test_duplicate_name_returns_409` | duplicate name → 409 CONFLICT from the real API server |
+| `test_restart_replaces_pods` | restart → 202, all old pods replaced, back to HEALTHY |
+
+They are skipped automatically when no cluster is reachable.
+
+**Unit tests** run without a cluster: an in-memory fake replaces the Kubernetes gateway.
 They cover validation rules, every endpoint and error code, the health rules, and
 the exact calls the real gateway makes (strategic merge patch content-type,
 Foreground delete) using mocks.
