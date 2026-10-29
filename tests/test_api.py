@@ -155,6 +155,18 @@ def test_get_returns_detail_with_pods(api, gateway):
     container = pods[0]["containers"][0]
     assert container["state"] == "waiting" and container["reason"] == "ImagePullBackOff"
     assert pods[0]["node"] == "k3d-learn-agent-0" and pods[0]["phase"] == "Pending"
+    # The same failure is reported at the deployment level too.
+    assert r.json()["health"] == "FAILING"
+    assert "ImagePullBackOff" in r.json()["health_reason"]
+
+
+def test_list_reports_health_per_deployment(api, gateway):
+    create(api, name="good")
+    create(api, name="bad")
+    add_pod(gateway, "dev", "bad", "bad-1")
+    health = {d["name"]: d["health"] for d in api.get("/api/deployments").json()["items"]}
+    assert health["bad"] == "FAILING"
+    assert health["good"] == "PROGRESSING"  # fake has no controller: never observed
 
 
 def test_get_unknown_id_returns_404(api):

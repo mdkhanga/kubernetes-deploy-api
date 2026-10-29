@@ -1,0 +1,235 @@
+# deploy-api
+
+A REST service that creates, manages and monitors Kubernetes Deployments on a real
+cluster. Every read comes live from the Kubernetes API; nothing is cached.
+
+- **API:** FastAPI + the official Kubernetes Python client
+- **Health:** each deployment gets `HEALTHY`, `DEGRADED`, `FAILING`, `PROGRESSING` or `UNKNOWN`, with a reason
+- **Design and decisions:** see [docs/DESIGN.md](docs/DESIGN.md)
+
+## Status
+
+| Feature | State |
+| --- | --- |
+| Create, list, get, delete deployments | Done |
+| Deployment and pod-level status, aggregated health | Done |
+| PATCH (scale, image) and rollout restart | Next |
+| CLI (`deploy create/list/status/scale/restart/delete`) | Planned |
+
+## Prerequisites
+
+- Python 3.12+
+- A Kubernetes cluster and a kubeconfig pointing at it. Examples use a local
+  [k3d](https://k3d.io) cluster: `k3d cluster create learn`
+- `kubectl` (optional, to see what the API did)
+
+The API uses `~/.kube/config` (current context) when run locally, or its
+ServiceAccount when run inside a pod.
+
+## Setup
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Run
+
+```bash
+uvicorn app.main:app --port 8090 --reload
+```
+
+- API base URL: `http://localhost:8090/api/deployments`
+- Interactive docs (Swagger UI): http://localhost:8090/docs
+- Liveness: `GET /healthz`
+
+## Endpoints
+
+| Method | Path | Description | Success |
+| --- | --- | --- | --- |
+| POST | `/api/deployments` | Create a Deployment (creates the namespace if needed) | 201 |
+| GET | `/api/deployments?namespace=<ns>` | List managed deployments, optional namespace filter | 200 |
+| GET | `/api/deployments/{id}` | Detail: replicas, conditions, pods, health | 200 |
+| DELETE | `/api/deployments/{id}` | Delete with cascade (Foreground) | 202 |
+
+`{id}` is the Deployment's Kubernetes **UID**, returned by create and list.
+
+## Walkthrough against a cluster
+
+Set variables on their own line. `ID=x curl .../$ID` on one line does **not**
+work: the shell expands `$ID` before the assignment applies.
+
+### 1. Create a healthy deployment
+
+```bash
+curl -s -X POST localhost:8090/api/deployments \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "web", "namespace": "dev", "image": "nginx:latest", "replicas": 3, "port": 80}' \
+  | python -m json.tool
+```
+
+The response is `201` with the deployment, its `id` (UID) and initial status
+(`PROGRESSING`, 0 ready). Check that it's real:
+
+```bash
+kubectl get deploy,pods -n dev -l app.kubernetes.io/managed-by=deploy-api
+```
+
+### 2. Watch it become healthy
+
+```bash
+curl -s 'localhost:8090/api/deployments?namespace=dev' \
+  | python -c "import sys,json; [print(d['name'], d['health'], '-', d['health_reason']) for d in json.load(sys.stdin)['items']]"
+```
+
+```
+web PROGRESSING - Rollout in progress: 3/3 updated, 1/3 ready
+web HEALTHY - All 3 replicas ready
+```
+
+### 3. Deploy a bad image and see the failure
+
+```bash
+curl -s -X POST localhost:8090/api/deployments \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "broken", "namespace": "dev", "image": "nginx:nonexistent", "replicas": 2}' \
+  | python -m json.tool
+```
+
+After ~20 seconds the list shows:
+
+```
+broken FAILING - ImagePullBackOff in 2 pod(s): broken-5cb68f846f-9ml5j, broken-5cb68f846f-gjf66 (0/2 ready)
+web HEALTHY - All 3 replicas ready
+```
+
+### 4. Inspect pod-level detail
+
+```bash
+BAD=<id of broken>
+curl -s localhost:8090/api/deployments/$BAD | python -m json.tool
+```
+
+Abridged response:
+
+```json
+{
+  "id": "c0bca7db-1a39-4139-aa73-831e51702c48",
+  "name": "broken",
+  "namespace": "dev",
+  "image": "nginx:nonexistent",
+  "replicas": {"desired": 2, "current": 2, "updated": 2, "ready": 0, "available": 0, "unavailable": 2},
+  "health": "FAILING",
+  "health_reason": "ImagePullBackOff in 2 pod(s): ... (0/2 ready)",
+  "conditions": [
+    {"type": "Available", "status": "False", "reason": "MinimumReplicasUnavailable", "...": "..."},
+    {"type": "Progressing", "status": "True", "reason": "ReplicaSetUpdated", "...": "..."}
+  ],
+  "created_at": "2026-10-29T17:05:12Z",
+  "last_updated_at": "2026-10-29T17:05:13Z",
+  "pods": [
+    {
+      "name": "broken-5cb68f846f-9ml5j",
+      "phase": "Pending",
+      "node": "k3d-learn-agent-0",
+      "ready": false,
+      "restart_count": 0,
+      "containers": [
+        {"name": "broken", "image": "nginx:nonexistent", "state": "waiting",
+         "reason": "ImagePullBackOff", "message": "Back-off pulling image \"nginx:nonexistent\""}
+      ]
+    }
+  ]
+}
+```
+
+### 5. Errors
+
+```bash
+# 409: same name in the same namespace
+curl -s -X POST localhost:8090/api/deployments -H 'Content-Type: application/json' \
+  -d '{"name": "web", "namespace": "dev", "image": "nginx:latest"}' | python -m json.tool
+
+# 400: every invalid field is reported
+curl -s -X POST localhost:8090/api/deployments -H 'Content-Type: application/json' \
+  -d '{"name": "Bad_Name", "image": "nginx latest", "replicas": -1}' | python -m json.tool
+
+# 404: unknown id
+curl -s localhost:8090/api/deployments/nope | python -m json.tool
+```
+
+All errors share one shape:
+
+```json
+{
+  "error": {
+    "code": "INVALID_INPUT",
+    "message": "Request validation failed",
+    "details": [
+      {"field": "name", "message": "must be a DNS-1123 label: ..."},
+      {"field": "image", "message": "must be a valid image reference, ..."},
+      {"field": "replicas", "message": "Input should be greater than or equal to 0"}
+    ]
+  }
+}
+```
+
+| HTTP | `code` | When |
+| --- | --- | --- |
+| 400 | `INVALID_INPUT` | Bad request body or query, or Kubernetes rejected the object |
+| 404 | `NOT_FOUND` | No managed deployment with that id |
+| 409 | `CONFLICT` | Name already exists in that namespace |
+| 500 | `KUBERNETES_ERROR` | Kubernetes API error (forbidden, quota, server error), with its message |
+| 500 | `KUBERNETES_UNREACHABLE` | API server cannot be reached |
+| 500 | `INTERNAL_ERROR` | Unexpected error |
+
+### 6. Delete
+
+```bash
+curl -s -X DELETE localhost:8090/api/deployments/$BAD | python -m json.tool
+kubectl get pods -n dev -w      # the pods are removed first, then the deployment
+```
+
+## Create request fields
+
+| Field | Required | Default | Rules |
+| --- | --- | --- | --- |
+| `name` | yes | | DNS-1123 label, max 63 chars |
+| `image` | yes | | Image reference, e.g. `nginx:1.27`, `registry.example.com/team/app:v1` |
+| `namespace` | no | `default` | DNS-1123 label; created if missing |
+| `replicas` | no | `1` | 0 to 100 |
+| `port` | no | | 1 to 65535 |
+| `resources.requests.cpu/memory`, `resources.limits.cpu/memory` | no | | Kubernetes quantities > 0; request ≤ limit |
+| `env` | no | `[]` | `[{"name": "KEY", "value": "v"}]`; valid, unique names |
+| `labels` | no | `{}` | Valid label keys/values; `app.kubernetes.io/managed-by` and `deploy-api/name` are reserved |
+| `command`, `args` | no | | Lists of strings |
+
+Unknown fields are rejected.
+
+## Tests
+
+```bash
+pytest -v
+```
+
+Tests run without a cluster: an in-memory fake replaces the Kubernetes gateway.
+They cover validation rules, every endpoint and error code, and the health rules.
+
+## Project layout
+
+```
+app/
+  main.py          app wiring, error handlers (400/404/409/500)
+  routes.py        REST endpoints
+  models.py        request/response models (pydantic)
+  validation.py    Kubernetes input rules
+  service.py       business logic: build Deployment, resolve id, assemble status
+  convert.py       Kubernetes objects -> API responses
+  health.py        aggregated health rules
+  k8s_gateway.py   the only code that calls the Kubernetes API
+  errors.py        error types and the error JSON shape
+  constants.py     labels, annotation, limits
+tests/             pytest suites + FakeGateway
+docs/DESIGN.md     design choices and decisions
+```
