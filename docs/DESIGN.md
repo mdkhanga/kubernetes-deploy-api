@@ -96,3 +96,61 @@ reads it live.
 - Replicas capped at 100 to catch typos; adjustable in `app/constants.py`.
 - UID lookup scans all managed deployments; fine for hundreds, would need an index
   (or a namespace in the id) for many thousands.
+
+## Not built: how I would add the remaining stretch goals
+
+### Deployment history and rollback
+- **History:** list the ReplicaSets owned by the Deployment (ownerReference uid). Each one
+  is a revision: annotation `deployment.kubernetes.io/revision`, its pod template (image),
+  creation time, and `kubernetes.io/change-cause` if set. Endpoint
+  `GET /api/deployments/{id}/history`, newest first. PATCH would also set `change-cause`
+  ("image nginx:1.27 via deploy-api") so history is readable.
+- **Rollback:** Kubernetes has no server-side rollback API any more (it was removed with
+  `extensions/v1beta1`); `kubectl rollout undo` works client-side by copying the target
+  ReplicaSet's pod template into the Deployment. `POST /api/deployments/{id}/rollback`
+  with optional `{"revision": N}` (default: previous) would do the same: take the template,
+  drop the `pod-template-hash` label, and write it to `spec.template` with a
+  `resourceVersion` precondition so a concurrent change fails with 409 instead of being
+  overwritten. The Deployment controller then rolls out as usual; the restored template
+  gets a new revision number, as with kubectl.
+- **CLI:** `deploy history REF`, `deploy rollback REF [--revision N]`.
+- **Tests:** fake ReplicaSets for revision listing and template selection; integration:
+  v1 → v2 → rollback → image back to v1 and HEALTHY.
+
+### Resource quota enforcement
+- **Config:** `quotas.yaml` (path from `DEPLOY_API_QUOTAS`), validated with pydantic:
+  `namespaces: {dev: {requests.cpu: "4", requests.memory: 8Gi, limits.cpu: "8", limits.memory: 16Gi}}`.
+- **Apply:** at startup and whenever the API creates a namespace, create or update a
+  `ResourceQuota` named `deploy-api-quota` per configured namespace (server-side apply,
+  idempotent).
+- **Block:** before create, scale or image change, compute what the change needs
+  (replicas × per-pod requests/limits, plus the extra pods `maxSurge` allows during a
+  rollout), compare with the quota's `status.hard - status.used`, and reject with a
+  structured `QUOTA_EXCEEDED` error showing requested vs available. Kubernetes itself
+  still enforces the quota at pod creation; the pre-check gives an immediate, clear error
+  instead of a deployment that silently fails (today that case already shows as FAILING
+  through the `ReplicaFailure` condition).
+- Namespaces with a quota require CPU/memory requests and limits on every pod, so the API
+  would require `resources` there (or apply a `LimitRange` with defaults).
+- **RBAC:** resourcequotas get/list/create/patch.
+
+### Health checks (probes)
+- **Request:** `probes: {liveness, readiness, startup}`, each with exactly one handler
+  (`http_get {path, port}`, `tcp_socket {port}`, `exec {command}`) plus
+  `initial_delay_seconds`, `period_seconds`, `timeout_seconds`, `failure_threshold`
+  with sane bounds; a pydantic discriminated union enforces "exactly one handler".
+  `build_deployment` maps them to `V1Probe`; PATCH could update them (a template change,
+  so a rolling update).
+- **Status:** containers already report `ready`; add `started` and the latest probe
+  failure from pod events (`Readiness probe failed: ...`, read via the events API filtered
+  by the pod). Health rule: Running but not ready beyond the probe's grace period → DEGRADED
+  with reason "readiness probe failing on N pod(s)".
+
+### Other next steps
+- Run in-cluster: Dockerfile + ServiceAccount + least-privilege ClusterRole (the RBAC list
+  above) + Deployment for the API itself.
+- Authentication on the API (it currently relies on network access + the kubeconfig's power).
+- Scale: an informer cache / watch instead of live list calls, if read volume grows; an
+  index (or namespace in the id) for UID lookup.
+- Ingress creation to reach exposed services from outside the cluster.
+- A web UI as an alternative to the CLI (same API; logs over WebSocket or SSE).
