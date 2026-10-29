@@ -9,7 +9,7 @@ import copy
 import uuid
 from datetime import datetime, timezone
 
-from kubernetes.client import V1Deployment, V1DeploymentStatus, V1Pod
+from kubernetes.client import V1Deployment, V1DeploymentStatus, V1Pod, V1Service
 from kubernetes.client.exceptions import ApiException
 
 
@@ -45,6 +45,8 @@ class FakeGateway:
         self.log_errors: dict[str, Exception] = {}         # pod name -> error when opening its log
         self.log_calls: list[tuple[str, str, bool, int]] = []
         self.opened_logs: list["FakeLogStream"] = []
+        self.services: dict[tuple[str, str], V1Service] = {}
+        self.service_error: Exception | None = None  # set to make create_service fail
         self.fail_with: Exception | None = None  # set to simulate API failures
 
     def _maybe_fail(self):
@@ -103,8 +105,37 @@ class FakeGateway:
         self._maybe_fail()
         if (namespace, name) not in self.deployments:
             raise ApiException(status=404, reason="Not Found")
-        del self.deployments[(namespace, name)]
+        uid = self.deployments.pop((namespace, name)).metadata.uid
         self.deleted.append((namespace, name))
+        # Garbage collection: objects owned by the deleted Deployment go too.
+        for key, svc in list(self.services.items()):
+            if any(ref.uid == uid for ref in (svc.metadata.owner_references or [])):
+                del self.services[key]
+
+    def create_service(self, namespace: str, body: V1Service) -> V1Service:
+        self._maybe_fail()
+        if self.service_error:
+            raise self.service_error
+        key = (namespace, body.metadata.name)
+        if key in self.services:
+            raise ApiException(status=409, reason="Conflict")
+        svc = copy.deepcopy(body)
+        svc.metadata.namespace = namespace
+        svc.metadata.uid = str(uuid.uuid4())
+        svc.spec.cluster_ip = f"10.43.0.{len(self.services) + 10}"
+        port = svc.spec.ports[0]
+        if svc.spec.type == "NodePort" and port.node_port is None:
+            port.node_port = 30000 + len(self.services)
+        self.services[key] = svc
+        return copy.deepcopy(svc)
+
+    def list_services(self, namespace: str | None, label_selector: str) -> list[V1Service]:
+        self._maybe_fail()
+        return [
+            copy.deepcopy(s)
+            for (ns, _), s in self.services.items()
+            if (namespace is None or ns == namespace) and _matches(s.metadata.labels, label_selector)
+        ]
 
     def list_pods(self, namespace: str | None, label_selector: str) -> list[V1Pod]:
         self._maybe_fail()

@@ -130,6 +130,17 @@ def test_create_sends_full_body(fake):
     assert WEB_ID in result.output
 
 
+def test_create_with_expose_sends_service(fake):
+    fake.routes[("POST", "/api/deployments")] = (201, {**WEB, "service": {
+        "name": "web", "type": "NodePort", "cluster_ip": "10.43.0.10", "port": 80, "target_port": 80,
+        "node_port": 31080, "urls": ["http://web.dev.svc.cluster.local:80", "http://<node-ip>:31080"]}})
+    result = run("create", "--name", "web", "--image", "nginx", "--port", "80",
+                 "--expose", "NodePort", "--node-port", "31080")
+    assert result.exit_code == 0, result.output
+    assert json.loads(fake.last("POST").content)["service"] == {"type": "NodePort", "node_port": 31080}
+    assert "http://<node-ip>:31080" in result.output
+
+
 def test_create_rejects_malformed_env(fake):
     result = run("create", "--name", "web", "--image", "nginx", "--env", "NOEQUALS")
     assert result.exit_code == 2

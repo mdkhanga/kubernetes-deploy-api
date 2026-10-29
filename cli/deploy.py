@@ -164,6 +164,11 @@ def render_status(d: dict) -> Group:
     header.add_row("Last updated", str(d.get("last_updated_at") or "-"))
     if d.get("restarted_at"):
         header.add_row("Restarted", d["restarted_at"])
+    if d.get("service"):
+        s = d["service"]
+        ports = f"{s['port']} -> {s['target_port']}" + (f", nodePort {s['node_port']}" if s.get("node_port") else "")
+        header.add_row("Service", f"{s['type']} {s['name']} ({s.get('cluster_ip') or '-'}), port {ports}")
+        header.add_row("URLs", "\n".join(s["urls"]))
 
     r = d["replicas"]
     replicas = Table(title="Replicas", title_justify="left")
@@ -245,8 +250,11 @@ def create(
     label: list[str] | None = typer.Option(None, "--label", "-l", help="KEY=VALUE (repeatable)"),
     command: str | None = typer.Option(None, "--command", help="Command override, e.g. 'sh -c'"),
     arg: list[str] | None = typer.Option(None, "--arg", help="Argument (repeatable)"),
+    expose: str | None = typer.Option(None, "--expose", help="Create a Service: ClusterIP or NodePort (needs --port)"),
+    service_port: int | None = typer.Option(None, "--service-port", help="Service port (default: --port)"),
+    node_port: int | None = typer.Option(None, "--node-port", help="NodePort 30000-32767 (default: assigned)"),
 ):
-    """Create a deployment."""
+    """Create a deployment (optionally exposed by a Service)."""
     body: dict = {"name": name, "image": image, "namespace": namespace, "replicas": replicas}
     if port is not None:
         body["port"] = port
@@ -262,10 +270,15 @@ def create(
         body["command"] = shlex.split(command)
     if arg:
         body["args"] = arg
+    if expose:
+        body["service"] = {"type": expose, **({"port": service_port} if service_port else {}),
+                           **({"node_port": node_port} if node_port else {})}
 
     d = api(ctx).call("POST", "/api/deployments", json=body)
     console.print(f"Created deployment [bold]{d['namespace']}/{d['name']}[/bold]  id: {d['id']}")
     console.print(Text.assemble("Health: ", health_text(d["health"]), f"  {d['health_reason']}"))
+    if d.get("service"):
+        console.print(f"Service: {d['service']['type']}  " + "  ".join(d["service"]["urls"]))
 
 
 @app.command("list")

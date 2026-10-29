@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from typing import Protocol
 
 from kubernetes import client, config
-from kubernetes.client import V1Deployment, V1Namespace, V1ObjectMeta, V1Pod
+from kubernetes.client import V1Deployment, V1Namespace, V1ObjectMeta, V1Pod, V1Service
 from kubernetes.client.exceptions import ApiException
 from kubernetes.watch.watch import iter_resp_lines
 
@@ -46,6 +46,8 @@ class Gateway(Protocol):
     def delete_deployment(self, namespace: str, name: str) -> None: ...
     def list_pods(self, namespace: str | None, label_selector: str) -> list[V1Pod]: ...
     def open_pod_log(self, namespace: str, pod: str, follow: bool, tail_lines: int) -> LogStream: ...
+    def create_service(self, namespace: str, body: V1Service) -> V1Service: ...
+    def list_services(self, namespace: str | None, label_selector: str) -> list[V1Service]: ...
 
 
 class KubernetesGateway:
@@ -124,6 +126,20 @@ class KubernetesGateway:
             )
         else:
             result = self.core.list_pod_for_all_namespaces(
+                label_selector=label_selector, _request_timeout=REQUEST_TIMEOUT_SECONDS
+            )
+        return result.items
+
+    def create_service(self, namespace: str, body: V1Service) -> V1Service:
+        return self.core.create_namespaced_service(namespace, body, _request_timeout=REQUEST_TIMEOUT_SECONDS)
+
+    def list_services(self, namespace: str | None, label_selector: str) -> list[V1Service]:
+        if namespace:
+            result = self.core.list_namespaced_service(
+                namespace, label_selector=label_selector, _request_timeout=REQUEST_TIMEOUT_SECONDS
+            )
+        else:
+            result = self.core.list_service_for_all_namespaces(
                 label_selector=label_selector, _request_timeout=REQUEST_TIMEOUT_SECONDS
             )
         return result.items

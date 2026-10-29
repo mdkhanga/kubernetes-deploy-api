@@ -29,6 +29,7 @@ deploy status web
 | PATCH (scale, image) and rollout restart | Done |
 | CLI (`deploy create/list/status/scale/set-image/restart/delete`) | Done |
 | Log streaming: `GET .../logs` + `deploy logs [-f]` (stretch) | Done |
+| Service exposure: optional ClusterIP/NodePort Service + access URLs (stretch) | Done |
 
 ## Prerequisites
 
@@ -81,6 +82,7 @@ Start the API first, then:
 ```bash
 deploy create --name web --image nginx:latest -n dev -r 3 --port 80
 deploy create --name broken --image nginx:nonexistent -n dev -r 2
+deploy create --name site --image nginx:1.27 -n dev -r 2 --port 80 --expose NodePort   # + Service
 deploy list                     # table with color-coded health
 deploy list -n dev --wide       # namespace filter + health reason
 deploy list --watch             # refresh every 5s (Ctrl+C to stop)
@@ -97,7 +99,7 @@ deploy delete broken            # asks for confirmation (--yes to skip)
 
 | Command | Purpose |
 | --- | --- |
-| `create --name --image [-n NS] [-r N] [--port] [--cpu-request] [--memory-request] [--cpu-limit] [--memory-limit] [-e K=V]... [-l K=V]... [--command "..."] [--arg A]...` | Create a deployment |
+| `create --name --image [-n NS] [-r N] [--port] [--cpu-request] [--memory-request] [--cpu-limit] [--memory-limit] [-e K=V]... [-l K=V]... [--command "..."] [--arg A]... [--expose ClusterIP\|NodePort [--service-port P] [--node-port NP]]` | Create a deployment, optionally with a Service |
 | `list [-n NS] [--wide] [--watch]` | All deployments with health (green HEALTHY, yellow DEGRADED, blue PROGRESSING, red FAILING) |
 | `status REF [--watch]` | Detail: health + reason, replica counts, conditions, pod table |
 | `scale REF --replicas N` | Scale |
@@ -290,6 +292,14 @@ kubectl get pods -n dev -w      # the pods are removed first, then the deploymen
 | `env` | no | `[]` | `[{"name": "KEY", "value": "v"}]`; valid, unique names |
 | `labels` | no | `{}` | Valid label keys/values; `app.kubernetes.io/managed-by` and `deploy-api/name` are reserved |
 | `command`, `args` | no | | Lists of strings |
+| `service` | no | | `{"type": "ClusterIP"\|"NodePort", "port": <service port, default = port>, "node_port": <30000-32767, NodePort only>}`; requires `port` |
+
+**Service exposure:** with `service`, the API also creates a Service selecting the
+deployment's pods. The Service is **owned by the Deployment** (ownerReference), so
+deleting the deployment removes it too. Responses include
+`service: {name, type, cluster_ip, port, target_port, node_port, urls}`, where `urls`
+has the in-cluster DNS name and, for NodePort, `http://<node-ip>:<nodePort>`. If the
+Service cannot be created, the Deployment is rolled back and the error returned.
 
 Unknown fields are rejected.
 
@@ -309,6 +319,7 @@ pytest -m integration -v     # integration tests: real cluster from your kubecon
 | `test_deployment_lifecycle` | create (namespace auto-created) → in list (with/without filter) → HEALTHY with Running pods → scale 2→3 → 3 ready, also in Kubernetes → delete → 404, gone from Kubernetes, pods gone |
 | `test_bad_image_is_reported_as_failing` | `nginx:nonexistent` → FAILING at deployment level; pod Pending, container waiting on ImagePullBackOff/ErrImagePull |
 | `test_duplicate_name_returns_409` | duplicate name → 409 CONFLICT from the real API server |
+| `test_service_exposure_routes_to_pods_and_is_garbage_collected` | NodePort Service created, owned by the Deployment, 2 ready endpoints; deleting the deployment garbage-collects it |
 | `test_restart_replaces_pods` | restart → 202, all old pods replaced, back to HEALTHY |
 
 They are skipped automatically when no cluster is reachable.
@@ -325,6 +336,7 @@ Foreground delete) using mocks.
 | `tests/test_health.py` | Aggregated health rules, one named case per scenario |
 | `tests/test_gateway.py` | Real gateway call details, with the Kubernetes client mocked |
 | `tests/test_cli.py` | CLI commands, request bodies, output, prompts, exit codes (mocked HTTP) |
+| `tests/test_service_exposure.py` | Service creation, ownership, access info, validation, rollback on failure |
 
 ## Project layout
 

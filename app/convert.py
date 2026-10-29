@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from kubernetes.client import V1ContainerStatus, V1Deployment, V1Pod
+from kubernetes.client import V1ContainerStatus, V1Deployment, V1Pod, V1Service
 
 from app.constants import RESTARTED_AT_ANNOTATION
 from app.health import compute_health
@@ -13,6 +13,7 @@ from app.models import (
     DeploymentSummary,
     PodStatus,
     ReplicaCounts,
+    ServiceInfo,
 )
 
 
@@ -114,7 +115,24 @@ def restarted_at(d: V1Deployment) -> datetime | None:
         return None
 
 
-def to_summary(d: V1Deployment, pods: list[V1Pod]) -> DeploymentSummary:
+def service_info(svc: V1Service) -> ServiceInfo:
+    port = svc.spec.ports[0]
+    name, namespace = svc.metadata.name, svc.metadata.namespace
+    urls = [f"http://{name}.{namespace}.svc.cluster.local:{port.port}"]
+    if port.node_port:
+        urls.append(f"http://<node-ip>:{port.node_port}")
+    return ServiceInfo(
+        name=name,
+        type=svc.spec.type,
+        cluster_ip=svc.spec.cluster_ip,
+        port=port.port,
+        target_port=port.target_port,
+        node_port=port.node_port,
+        urls=urls,
+    )
+
+
+def to_summary(d: V1Deployment, pods: list[V1Pod], service: V1Service | None = None) -> DeploymentSummary:
     health, health_reason = compute_health(d, pods)
     return DeploymentSummary(
         id=d.metadata.uid,
@@ -129,11 +147,12 @@ def to_summary(d: V1Deployment, pods: list[V1Pod]) -> DeploymentSummary:
         created_at=d.metadata.creation_timestamp,
         last_updated_at=last_updated_at(d),
         restarted_at=restarted_at(d),
+        service=service_info(service) if service else None,
     )
 
 
-def to_detail(d: V1Deployment, pods: list[V1Pod]) -> DeploymentDetail:
-    summary = to_summary(d, pods)
+def to_detail(d: V1Deployment, pods: list[V1Pod], service: V1Service | None = None) -> DeploymentDetail:
+    summary = to_summary(d, pods, service)
     return DeploymentDetail(
         **summary.model_dump(),
         pods=sorted((pod_status(p) for p in pods), key=lambda p: p.name),

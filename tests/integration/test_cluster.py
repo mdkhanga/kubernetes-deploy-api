@@ -82,6 +82,38 @@ def test_duplicate_name_returns_409(api, namespace):
     assert r.json()["error"]["code"] == "CONFLICT"
 
 
+def test_service_exposure_routes_to_pods_and_is_garbage_collected(api, namespace):
+    r = create(api, namespace, name="exposed", replicas=2, port=80, service={"type": "NodePort"})
+    assert r.status_code == 201, r.text
+    dep_id, svc = r.json()["id"], r.json()["service"]
+    assert svc["type"] == "NodePort" and 30000 <= svc["node_port"] <= 32767
+
+    # The real Service exists, is owned by the Deployment, and routes to both ready pods.
+    core = client.CoreV1Api()
+    k8s_svc = core.read_namespaced_service("exposed", namespace)
+    assert k8s_svc.metadata.owner_references[0].uid == dep_id
+    wait_for_health(api, dep_id, "HEALTHY", ready=2)
+
+    def ready_endpoints():
+        slices = client.DiscoveryV1Api().list_namespaced_endpoint_slice(
+            namespace, label_selector="kubernetes.io/service-name=exposed").items
+        return sum(1 for s in slices for e in (s.endpoints or []) if e.conditions and e.conditions.ready) == 2
+
+    wait_for(ready_endpoints, timeout=60, what="2 ready endpoints behind the Service")
+
+    # Deleting the Deployment garbage-collects the Service (ownerReference).
+    assert api.delete(f"/api/deployments/{dep_id}").status_code == 202
+
+    def service_gone():
+        try:
+            core.read_namespaced_service("exposed", namespace)
+            return False
+        except ApiException as e:
+            return e.status == 404
+
+    wait_for(service_gone, timeout=90, what="Service to be garbage-collected")
+
+
 def test_restart_replaces_pods(api, namespace):
     dep_id = create(api, namespace, name="restartme", replicas=1).json()["id"]
     before = {p["name"] for p in wait_for_health(api, dep_id, "HEALTHY", ready=1)["pods"]}

@@ -66,6 +66,24 @@ def test_patch_arguments_pass_real_client_validation():
     assert method == "PATCH" and headers["Content-Type"] == STRATEGIC_MERGE_PATCH
 
 
+def test_create_service_body_passes_real_client_validation():
+    from app.models import CreateDeploymentRequest
+    from app.service import build_deployment, build_service
+
+    req = CreateDeploymentRequest(name="web", image="nginx", namespace="dev", port=80,
+                                  service={"type": "NodePort", "node_port": 31080})
+    owner = build_deployment(req)
+    owner.metadata.uid = "11111111-2222-3333-4444-555555555555"
+    gw = KubernetesGateway()
+    gw._core = client.CoreV1Api(client.ApiClient(client.Configuration(host="http://unused")))
+    gw._apps = MagicMock()
+    gw._core.api_client.call_api = MagicMock()
+    gw._core.api_client.response_deserialize = MagicMock()
+    gw.create_service("dev", build_service(req, owner))
+    method, url, *_ = gw._core.api_client.call_api.call_args.args
+    assert method == "POST" and url.endswith("/api/v1/namespaces/dev/services")
+
+
 def test_list_all_namespaces_when_no_filter():
     gw = gateway_with_mocks()
     gw.list_deployments(None, "a=b")

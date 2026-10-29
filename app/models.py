@@ -58,6 +58,22 @@ class Resources(BaseModel):
         return self
 
 
+class ServiceSpec(BaseModel):
+    """Optional Service created alongside the Deployment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["ClusterIP", "NodePort"] = "ClusterIP"
+    port: int | None = Field(default=None, ge=1, le=65535, description="Service port; defaults to the container port")
+    node_port: int | None = Field(default=None, ge=30000, le=32767, description="NodePort only; default: assigned")
+
+    @model_validator(mode="after")
+    def _node_port_needs_nodeport_type(self) -> "ServiceSpec":
+        if self.node_port is not None and self.type != "NodePort":
+            raise ValueError("node_port is only allowed when type is NodePort")
+        return self
+
+
 class CreateDeploymentRequest(BaseModel):
     """Body of POST /api/deployments. Only name and image are required."""
 
@@ -73,6 +89,13 @@ class CreateDeploymentRequest(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     command: list[str] | None = None
     args: list[str] | None = None
+    service: ServiceSpec | None = None
+
+    @model_validator(mode="after")
+    def _service_needs_container_port(self) -> "CreateDeploymentRequest":
+        if self.service is not None and self.port is None:
+            raise ValueError("port (the container port) is required when service is set")
+        return self
 
     @field_validator("name", "namespace")
     @classmethod
@@ -180,6 +203,16 @@ class PodStatus(BaseModel):
     created_at: datetime | None = None
 
 
+class ServiceInfo(BaseModel):
+    name: str
+    type: str
+    cluster_ip: str | None = None
+    port: int
+    target_port: int | str | None = None
+    node_port: int | None = None
+    urls: list[str] = Field(description="How to reach it: cluster DNS name, and <node-ip>:<nodePort> for NodePort")
+
+
 class DeploymentSummary(BaseModel):
     id: str = Field(description="The Deployment's Kubernetes UID")
     name: str
@@ -193,6 +226,7 @@ class DeploymentSummary(BaseModel):
     created_at: datetime | None = None
     last_updated_at: datetime | None = None
     restarted_at: datetime | None = Field(default=None, description="Last rollout restart, if any")
+    service: ServiceInfo | None = Field(default=None, description="Service exposing the deployment, if created")
 
 
 class DeploymentDetail(DeploymentSummary):

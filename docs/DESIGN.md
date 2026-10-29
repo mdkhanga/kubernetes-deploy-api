@@ -63,6 +63,10 @@ reads it live.
 | 27d | **Log streams opened before the response starts** | Errors (unknown pod, container not started) still return structured JSON; a pod that cannot serve logs is reported inline when reading all pods | Errors mid-stream |
 | 27e | **Streams closed in `finally`** when the response ends or the client disconnects; no timeout on followed streams (10s otherwise) | No leaked Kubernetes connections; a quiet followed log is not cut off. The v37 client rejects a `None` read timeout, so follow passes no timeout (the API server was reached moments earlier to list pods). Limitation: after a client disconnects, cleanup happens when the next log line arrives | Per-read timeouts |
 | 27f | **Gateway tests run the real client methods with only the network call stubbed** | The v37 client validates arguments (pydantic); pure mocks hid a bad `_request_timeout` value that failed at runtime | Mock-only tests |
+| 27g | **Optional Service is owned by the Deployment** (ownerReference, `blockOwnerDeletion`) and selects the immutable name label | Deleting the deployment garbage-collects the Service (and Foreground delete waits for it); no cleanup code or orphans | Deleting the Service explicitly |
+| 27h | **Create with a Service is all-or-nothing**: if the Service fails (name taken, NodePort allocated), the Deployment is deleted and the error returned | The caller never gets an error while a half-created deployment keeps running | Return success with a warning |
+| 27i | **Service types limited to ClusterIP and NodePort**; `port` defaults to the container port; `node_port` only with NodePort | What the spec asks; LoadBalancer depends on the environment | Allow LoadBalancer |
+| 27j | **Access URLs = cluster DNS name, plus `<node-ip>:<nodePort>`** | Node IPs vary by environment (and need extra RBAC to list nodes); the placeholder is honest | Listing nodes to fill in IPs |
 | 28 | **Integration tests in pytest (`-m integration`), not a shell smoke script** | Real assertions and pass/fail counts; same tooling as unit tests; excluded from the default fast run | Bash + curl smoke script |
 | 29 | **Integration tests run the app in-process** (TestClient + real KubernetesGateway) | Full HTTP → service → Kubernetes path without managing a server process | Starting uvicorn in a fixture |
 | 30 | **One throwaway namespace per run, deleted at the end; `wait_for` polling** | Isolation from real workloads; Kubernetes is eventually consistent, so tests poll with timeouts instead of sleeping fixed times | Shared namespace; fixed sleeps |
@@ -87,7 +91,8 @@ reads it live.
 - One container per Deployment (the request schema describes a single container).
 - No authentication on the API; access to the cluster is whatever the kubeconfig
   or ServiceAccount allows. In-cluster, the ServiceAccount needs: deployments
-  (list, create, patch, delete), pods (list), namespaces (get, create).
+  (list, create, patch, delete), pods (list), pods/log (get), services (list, create),
+  namespaces (get, create).
 - Replicas capped at 100 to catch typos; adjustable in `app/constants.py`.
 - UID lookup scans all managed deployments; fine for hundreds, would need an index
   (or a namespace in the id) for many thousands.

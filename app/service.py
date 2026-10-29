@@ -3,6 +3,7 @@
 No state is stored here: every call reads the current state from the cluster.
 """
 
+import logging
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -14,9 +15,13 @@ from kubernetes.client import (
     V1EnvVar,
     V1LabelSelector,
     V1ObjectMeta,
+    V1OwnerReference,
     V1PodSpec,
     V1PodTemplateSpec,
     V1ResourceRequirements,
+    V1Service,
+    V1ServicePort,
+    V1ServiceSpec,
 )
 from kubernetes.client.exceptions import ApiException
 
@@ -34,6 +39,8 @@ from app.models import (
 )
 
 MANAGED_SELECTOR = f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"
+
+log = logging.getLogger("deploy-api")
 
 
 def build_deployment(req: CreateDeploymentRequest) -> V1Deployment:
@@ -72,6 +79,38 @@ def build_deployment(req: CreateDeploymentRequest) -> V1Deployment:
     )
 
 
+def build_service(req: CreateDeploymentRequest, owner: V1Deployment) -> V1Service:
+    """A Service selecting the deployment's pods, OWNED by the Deployment: deleting the
+    Deployment garbage-collects the Service, so no cleanup code is needed."""
+    return V1Service(
+        api_version="v1",
+        kind="Service",
+        metadata=V1ObjectMeta(
+            name=req.name,
+            namespace=req.namespace,
+            labels={MANAGED_BY_LABEL: MANAGED_BY_VALUE, NAME_LABEL: req.name},
+            owner_references=[V1OwnerReference(
+                api_version="apps/v1", kind="Deployment",
+                name=owner.metadata.name, uid=owner.metadata.uid, block_owner_deletion=True,
+            )],
+        ),
+        spec=V1ServiceSpec(
+            type=req.service.type,
+            selector={NAME_LABEL: req.name},
+            ports=[V1ServicePort(
+                name="http", protocol="TCP",
+                port=req.service.port or req.port,
+                target_port=req.port,
+                node_port=req.service.node_port,
+            )],
+        ),
+    )
+
+
+def owned_by(svc: V1Service, d: V1Deployment) -> bool:
+    return any(ref.uid == d.metadata.uid for ref in (svc.metadata.owner_references or []))
+
+
 def pod_selector(d: V1Deployment) -> str:
     """Use the Deployment's own selector to find its pods (old and new during a rollout)."""
     return ",".join(f"{k}={v}" for k, v in sorted(d.spec.selector.match_labels.items()))
@@ -89,23 +128,40 @@ class DeploymentService:
             if e.status == 409:
                 raise ConflictError(f"Deployment '{req.name}' already exists in namespace '{req.namespace}'")
             raise
-        return to_detail(created, pods=[])
+
+        service = None
+        if req.service:
+            try:
+                service = self.gateway.create_service(req.namespace, build_service(req, created))
+            except Exception as e:
+                # All-or-nothing: the caller gets an error, so don't leave the Deployment behind.
+                self._rollback(created)
+                if isinstance(e, ApiException) and e.status == 409:
+                    raise ConflictError(f"Service '{req.name}' already exists in namespace '{req.namespace}'")
+                raise
+        return to_detail(created, pods=[], service=service)
 
     def list(self, namespace: str | None = None) -> list[DeploymentSummary]:
         deployments = self.gateway.list_deployments(namespace, MANAGED_SELECTOR)
-        # One pods call for all deployments (not one per deployment), grouped by owner.
+        # One pods call and one services call for all deployments, grouped by owner.
         pods_by_owner: dict[tuple[str, str], list] = {}
         for p in self.gateway.list_pods(namespace, MANAGED_SELECTOR):
             owner = (p.metadata.labels or {}).get(NAME_LABEL)
             pods_by_owner.setdefault((p.metadata.namespace, owner), []).append(p)
+        services = self.gateway.list_services(namespace, MANAGED_SELECTOR)
         summaries = [
-            to_summary(d, pods_by_owner.get((d.metadata.namespace, d.metadata.name), [])) for d in deployments
+            to_summary(
+                d,
+                pods_by_owner.get((d.metadata.namespace, d.metadata.name), []),
+                next((s for s in services if owned_by(s, d)), None),
+            )
+            for d in deployments
         ]
         return sorted(summaries, key=lambda s: (s.namespace, s.name))
 
     def get(self, deployment_id: str) -> DeploymentDetail:
         d = self._find(deployment_id)
-        return to_detail(d, self.gateway.list_pods(d.metadata.namespace, pod_selector(d)))
+        return to_detail(d, self.gateway.list_pods(d.metadata.namespace, pod_selector(d)), self._service_for(d))
 
     def update(self, deployment_id: str, req: PatchDeploymentRequest) -> DeploymentDetail:
         """Scale and/or change the image. An image change alters the pod template,
@@ -129,7 +185,19 @@ class DeploymentService:
 
     def _patch(self, d: V1Deployment, patch: dict) -> DeploymentDetail:
         updated = self.gateway.patch_deployment(d.metadata.namespace, d.metadata.name, patch)
-        return to_detail(updated, self.gateway.list_pods(updated.metadata.namespace, pod_selector(updated)))
+        return to_detail(
+            updated, self.gateway.list_pods(updated.metadata.namespace, pod_selector(updated)), self._service_for(updated)
+        )
+
+    def _service_for(self, d: V1Deployment) -> V1Service | None:
+        selector = f"{NAME_LABEL}={d.metadata.name},{MANAGED_SELECTOR}"
+        return next((s for s in self.gateway.list_services(d.metadata.namespace, selector) if owned_by(s, d)), None)
+
+    def _rollback(self, d: V1Deployment) -> None:
+        try:
+            self.gateway.delete_deployment(d.metadata.namespace, d.metadata.name)
+        except Exception:
+            log.exception("Rollback failed: could not delete Deployment %s/%s", d.metadata.namespace, d.metadata.name)
 
     def logs(self, deployment_id: str, pod: str | None, follow: bool, tail_lines: int) -> Iterator[str]:
         """Validate and open the log streams eagerly, so errors become normal JSON
