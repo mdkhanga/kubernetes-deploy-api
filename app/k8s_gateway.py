@@ -4,11 +4,13 @@ Everything else goes through this small interface, so tests can swap in an
 in-memory fake (tests/fakes.py) and run without a cluster.
 """
 
+from collections.abc import Iterator
 from typing import Protocol
 
 from kubernetes import client, config
 from kubernetes.client import V1Deployment, V1Namespace, V1ObjectMeta, V1Pod
 from kubernetes.client.exceptions import ApiException
+from kubernetes.watch.watch import iter_resp_lines
 
 # Fail fast with a clear 500 instead of hanging when the API server is unreachable.
 REQUEST_TIMEOUT_SECONDS = 10
@@ -18,6 +20,24 @@ REQUEST_TIMEOUT_SECONDS = 10
 STRATEGIC_MERGE_PATCH = "application/strategic-merge-patch+json"
 
 
+class LogStream(Protocol):
+    def lines(self) -> Iterator[str]: ...
+    def close(self) -> None: ...
+
+
+class PodLogStream:
+    """An open HTTP stream of one pod's log, read line by line as it arrives."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def lines(self) -> Iterator[str]:
+        yield from iter_resp_lines(self._response)
+
+    def close(self) -> None:
+        self._response.close()  # also ends a `follow` stream that would otherwise run forever
+
+
 class Gateway(Protocol):
     def ensure_namespace(self, name: str) -> None: ...
     def create_deployment(self, namespace: str, body: V1Deployment) -> V1Deployment: ...
@@ -25,6 +45,7 @@ class Gateway(Protocol):
     def patch_deployment(self, namespace: str, name: str, patch: dict) -> V1Deployment: ...
     def delete_deployment(self, namespace: str, name: str) -> None: ...
     def list_pods(self, namespace: str | None, label_selector: str) -> list[V1Pod]: ...
+    def open_pod_log(self, namespace: str, pod: str, follow: bool, tail_lines: int) -> LogStream: ...
 
 
 class KubernetesGateway:
@@ -106,3 +127,19 @@ class KubernetesGateway:
                 label_selector=label_selector, _request_timeout=REQUEST_TIMEOUT_SECONDS
             )
         return result.items
+
+    def open_pod_log(self, namespace: str, pod: str, follow: bool, tail_lines: int) -> PodLogStream:
+        # Errors (pod gone, container not started yet) are raised here, before any streaming.
+        # A followed log may stay quiet for a long time, so it gets no timeout at all (this
+        # client rejects a None read timeout). The API server was just reached to list pods.
+        timeout = {} if follow else {"_request_timeout": REQUEST_TIMEOUT_SECONDS}
+        response = self.core.read_namespaced_pod_log(
+            pod,
+            namespace,
+            follow=follow,
+            tail_lines=tail_lines,
+            timestamps=False,
+            _preload_content=False,  # raw HTTP response: read as it arrives
+            **timeout,
+        )
+        return PodLogStream(response)

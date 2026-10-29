@@ -262,6 +262,70 @@ def test_restart_unknown_id_returns_404(api):
     assert api.post("/api/deployments/nope/restart").status_code == 404
 
 
+# ---------- GET /api/deployments/{id}/logs ----------
+
+@pytest.fixture
+def web_with_pods(api, gateway):
+    dep_id = create(api).json()["id"]
+    for name in ("web-a", "web-b"):
+        add_pod(gateway, "dev", "web", name)
+    gateway.logs = {"web-a": ["a1", "a2"], "web-b": ["b1"]}
+    return dep_id
+
+
+def test_logs_single_pod_unprefixed(api, gateway, web_with_pods):
+    r = api.get(f"/api/deployments/{web_with_pods}/logs", params={"pod": "web-a"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert r.text == "a1\na2\n"
+    assert gateway.log_calls == [("dev", "web-a", False, 100)]
+    assert all(s.closed for s in gateway.opened_logs)
+
+
+def test_logs_all_pods_prefixed_and_grouped(api, web_with_pods):
+    r = api.get(f"/api/deployments/{web_with_pods}/logs")
+    assert r.text.splitlines() == ["web-a | a1", "web-a | a2", "web-b | b1"]
+
+
+def test_logs_follow_merges_all_pods(api, gateway, web_with_pods):
+    r = api.get(f"/api/deployments/{web_with_pods}/logs", params={"follow": "true", "tail": 5})
+    assert sorted(r.text.splitlines()) == ["web-a | a1", "web-a | a2", "web-b | b1"]  # arrival order varies
+    assert {(pod, follow, tail) for _, pod, follow, tail in gateway.log_calls} == {("web-a", True, 5), ("web-b", True, 5)}
+
+
+def test_logs_pod_that_cannot_serve_logs_is_reported_inline(api, gateway, web_with_pods):
+    gateway.log_errors["web-b"] = ApiException(status=400, reason="Bad Request", body=(
+        '{"message": "container \\"web\\" in pod \\"web-b\\" is waiting to start: trying and failing to pull image"}'))
+    lines = api.get(f"/api/deployments/{web_with_pods}/logs").text.splitlines()
+    assert lines[0].startswith("web-b | [logs unavailable: container")
+    assert lines[1:] == ["web-a | a1", "web-a | a2"]
+
+
+def test_logs_single_pod_not_started_returns_400(api, gateway, web_with_pods):
+    gateway.log_errors["web-a"] = ApiException(status=400, reason="Bad Request",
+                                               body='{"message": "container is waiting to start"}')
+    r = api.get(f"/api/deployments/{web_with_pods}/logs", params={"pod": "web-a"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "LOGS_UNAVAILABLE"
+    assert "waiting to start" in r.json()["error"]["message"]
+
+
+def test_logs_unknown_pod_returns_404(api, web_with_pods):
+    r = api.get(f"/api/deployments/{web_with_pods}/logs", params={"pod": "someone-else"})
+    assert r.status_code == 404
+    assert "web-a, web-b" in r.json()["error"]["message"]
+
+
+def test_logs_deployment_without_pods_returns_404(api):
+    dep_id = create(api).json()["id"]
+    assert api.get(f"/api/deployments/{dep_id}/logs").status_code == 404
+
+
+@pytest.mark.parametrize("tail", [0, -1, 10001])
+def test_logs_invalid_tail_returns_400(api, web_with_pods, tail):
+    assert api.get(f"/api/deployments/{web_with_pods}/logs", params={"tail": tail}).status_code == 400
+
+
 # ---------- DELETE /api/deployments/{id} ----------
 
 def test_delete_returns_202_and_removes_deployment(api, gateway):

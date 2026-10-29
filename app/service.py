@@ -3,6 +3,7 @@
 No state is stored here: every call reads the current state from the cluster.
 """
 
+from collections.abc import Iterator
 from datetime import datetime, timezone
 
 from kubernetes.client import (
@@ -21,8 +22,9 @@ from kubernetes.client.exceptions import ApiException
 
 from app.constants import MANAGED_BY_LABEL, MANAGED_BY_VALUE, NAME_LABEL, RESTARTED_AT_ANNOTATION
 from app.convert import to_detail, to_summary
-from app.errors import ConflictError, NotFoundError
+from app.errors import ConflictError, LogsUnavailableError, NotFoundError, kubernetes_message
 from app.k8s_gateway import Gateway
+from app.logs import all_pods, single_pod
 from app.models import (
     CreateDeploymentRequest,
     DeleteResponse,
@@ -128,6 +130,35 @@ class DeploymentService:
     def _patch(self, d: V1Deployment, patch: dict) -> DeploymentDetail:
         updated = self.gateway.patch_deployment(d.metadata.namespace, d.metadata.name, patch)
         return to_detail(updated, self.gateway.list_pods(updated.metadata.namespace, pod_selector(updated)))
+
+    def logs(self, deployment_id: str, pod: str | None, follow: bool, tail_lines: int) -> Iterator[str]:
+        """Validate and open the log streams eagerly, so errors become normal JSON
+        responses; only then return the iterator that the HTTP response streams."""
+        d = self._find(deployment_id)
+        ns, name = d.metadata.namespace, d.metadata.name
+        pod_names = sorted(p.metadata.name for p in self.gateway.list_pods(ns, pod_selector(d)))
+
+        if pod is not None:
+            if pod not in pod_names:
+                raise NotFoundError(f"Pod '{pod}' is not part of deployment '{name}'. Pods: {', '.join(pod_names) or 'none'}")
+            try:
+                return single_pod(self.gateway.open_pod_log(ns, pod, follow, tail_lines))
+            except ApiException as e:
+                if e.status == 400:
+                    raise LogsUnavailableError(f"Logs for pod '{pod}' are not available: {kubernetes_message(e)}")
+                raise
+
+        if not pod_names:
+            raise NotFoundError(f"Deployment '{name}' has no pods")
+        streams, unavailable = {}, {}
+        for pod_name in pod_names:
+            try:
+                streams[pod_name] = self.gateway.open_pod_log(ns, pod_name, follow, tail_lines)
+            except ApiException as e:
+                if e.status != 400:
+                    raise
+                unavailable[pod_name] = kubernetes_message(e)  # e.g. container waiting to start
+        return all_pods(streams, unavailable, follow)
 
     def delete(self, deployment_id: str) -> DeleteResponse:
         d = self._find(deployment_id)

@@ -58,6 +58,19 @@ class Api:
             raise typer.Exit(1)
         return response.json()
 
+    def stream_lines(self, path: str, params: dict):
+        """Yield response lines as the server sends them (no read timeout: follow can be quiet)."""
+        try:
+            with self.http.stream("GET", path, params=params, timeout=httpx.Timeout(15, read=None)) as response:
+                if response.status_code >= 400:
+                    response.read()
+                    print_api_error(response)
+                    raise typer.Exit(1)
+                yield from response.iter_lines()
+        except httpx.TransportError as e:
+            err.print(f"[red]Cannot reach deploy-api at {self.base_url}[/red] ({e}). Is the server running?")
+            raise typer.Exit(2)
+
 
 def print_api_error(response: httpx.Response) -> None:
     try:
@@ -321,6 +334,25 @@ def restart(ctx: typer.Context, ref: str = typer.Argument(..., help="id, id pref
     d = resolve(client, ref)
     updated = client.call("POST", f"/api/deployments/{d['id']}/restart")
     console.print(f"Restarted [bold]{updated['namespace']}/{updated['name']}[/bold] at {updated.get('restarted_at')}")
+
+
+@app.command()
+def logs(
+    ctx: typer.Context,
+    ref: str = typer.Argument(..., help="id, id prefix, name or namespace/name"),
+    pod: str | None = typer.Option(None, "--pod", "-p", help="Only this pod (default: all pods, prefixed)"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Stream new lines until Ctrl+C"),
+    tail: int = typer.Option(100, "--tail", help="Lines of history per pod"),
+):
+    """Show or stream logs from the deployment's pods."""
+    client = api(ctx)
+    d = resolve(client, ref)
+    params = {"follow": str(follow).lower(), "tail": tail, **({"pod": pod} if pod else {})}
+    try:
+        for line in client.stream_lines(f"/api/deployments/{d['id']}/logs", params):
+            console.print(line, markup=False, highlight=False, soft_wrap=True)
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command()

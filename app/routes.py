@@ -1,6 +1,7 @@
 """REST endpoints. Thin: parse/validate input, call the service, return models."""
 
 from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from app import validation
 from app.errors import InvalidInputError
@@ -59,6 +60,21 @@ def update_deployment(
              response_model=DeploymentDetail, responses=ERRORS)
 def restart_deployment(deployment_id: str, service: DeploymentService = Depends(get_service)):
     return service.restart(deployment_id)
+
+
+@router.get("/{deployment_id}/logs", response_class=StreamingResponse, responses={
+    200: {"content": {"text/plain": {}}, "description": "Log lines; prefixed with the pod name when all pods are read"},
+    **ERRORS,
+})
+def deployment_logs(
+    deployment_id: str,
+    pod: str | None = Query(default=None, description="One pod; default: all pods of the deployment"),
+    follow: bool = Query(default=False, description="Keep streaming new lines (like kubectl logs -f)"),
+    tail: int = Query(default=100, ge=1, le=10000, description="Lines of history per pod"),
+    service: DeploymentService = Depends(get_service),
+):
+    lines = service.logs(deployment_id, pod, follow, tail)
+    return StreamingResponse(lines, media_type="text/plain; charset=utf-8")
 
 
 @router.delete("/{deployment_id}", status_code=status.HTTP_202_ACCEPTED, response_model=DeleteResponse, responses=ERRORS)

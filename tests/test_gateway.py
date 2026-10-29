@@ -2,7 +2,10 @@
 
 from unittest.mock import MagicMock
 
-from app.k8s_gateway import STRATEGIC_MERGE_PATCH, KubernetesGateway
+import pytest
+from kubernetes import client
+
+from app.k8s_gateway import REQUEST_TIMEOUT_SECONDS, STRATEGIC_MERGE_PATCH, KubernetesGateway
 
 
 def gateway_with_mocks():
@@ -24,6 +27,43 @@ def test_delete_cascades_in_foreground():
     gw.delete_deployment("dev", "web")
     _, kwargs = gw._apps.delete_namespaced_deployment.call_args
     assert kwargs["propagation_policy"] == "Foreground"
+
+
+def test_open_pod_log_streams_raw_response():
+    gw = gateway_with_mocks()
+    gw.open_pod_log("dev", "web-a", follow=True, tail_lines=50)
+    args, kwargs = gw._core.read_namespaced_pod_log.call_args
+    assert args == ("web-a", "dev")
+    assert kwargs["follow"] is True and kwargs["tail_lines"] == 50
+    assert kwargs["_preload_content"] is False      # stream, don't buffer the whole log
+    assert "_request_timeout" not in kwargs         # follow: no timeout on a quiet stream
+
+    gw.open_pod_log("dev", "web-a", follow=False, tail_lines=50)
+    _, kwargs = gw._core.read_namespaced_pod_log.call_args
+    assert kwargs["_request_timeout"] == REQUEST_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("follow", [True, False])
+def test_open_pod_log_arguments_pass_real_client_validation(follow):
+    """Mocks don't validate arguments. This runs the REAL client method (which checks its
+    arguments with pydantic) and only stubs the network call."""
+    gw = KubernetesGateway()
+    gw._core = client.CoreV1Api(client.ApiClient(client.Configuration(host="http://unused")))
+    gw._apps = MagicMock()
+    gw._core.api_client.call_api = MagicMock(return_value=MagicMock(status=200))
+    gw.open_pod_log("dev", "web-a", follow=follow, tail_lines=10)
+    gw._core.api_client.call_api.assert_called_once()
+
+
+def test_patch_arguments_pass_real_client_validation():
+    gw = KubernetesGateway()
+    gw._apps = client.AppsV1Api(client.ApiClient(client.Configuration(host="http://unused")))
+    gw._core = MagicMock()
+    gw._apps.api_client.call_api = MagicMock()
+    gw._apps.api_client.response_deserialize = MagicMock()
+    gw.patch_deployment("dev", "web", {"spec": {"replicas": 2}})
+    method, url, headers, *_ = gw._apps.api_client.call_api.call_args.args
+    assert method == "PATCH" and headers["Content-Type"] == STRATEGIC_MERGE_PATCH
 
 
 def test_list_all_namespaces_when_no_filter():

@@ -28,7 +28,7 @@ deploy status web
 | Deployment and pod-level status, aggregated health | Done |
 | PATCH (scale, image) and rollout restart | Done |
 | CLI (`deploy create/list/status/scale/set-image/restart/delete`) | Done |
-| `deploy logs` (stretch) | Planned |
+| Log streaming: `GET .../logs` + `deploy logs [-f]` (stretch) | Done |
 
 ## Prerequisites
 
@@ -68,6 +68,7 @@ uvicorn app.main:app --port 8090 --reload
 | GET | `/api/deployments/{id}` | Detail: replicas, conditions, pods, health | 200 |
 | PATCH | `/api/deployments/{id}` | Scale (`replicas`) and/or change `image` (rolling update) | 200 |
 | POST | `/api/deployments/{id}/restart` | Rollout restart, like `kubectl rollout restart` | 202 |
+| GET | `/api/deployments/{id}/logs?pod=&follow=&tail=` | Pod logs as `text/plain`, streamed. All pods (lines prefixed `pod \| `) unless `pod` is given; `follow=true` keeps streaming; `tail` = history lines per pod (1-10000, default 100) | 200 |
 | DELETE | `/api/deployments/{id}` | Delete with cascade (Foreground) | 202 |
 
 `{id}` is the Deployment's Kubernetes **UID**, returned by create and list.
@@ -88,6 +89,9 @@ deploy status web --watch
 deploy scale web --replicas 5
 deploy set-image web --image nginx:1.27
 deploy restart web
+deploy logs web                 # last 100 lines from every pod, prefixed with the pod name
+deploy logs web -f              # stream live from all pods (Ctrl+C to stop)
+deploy logs web --pod <pod> --tail 20
 deploy delete broken            # asks for confirmation (--yes to skip)
 ```
 
@@ -99,6 +103,7 @@ deploy delete broken            # asks for confirmation (--yes to skip)
 | `scale REF --replicas N` | Scale |
 | `set-image REF --image IMG` | Rolling update to a new image |
 | `restart REF` | Rollout restart |
+| `logs REF [--pod P] [-f] [--tail N]` | Logs from all pods (prefixed) or one pod; `-f` streams live |
 | `delete REF [--yes]` | Delete with confirmation |
 
 - `REF` can be the full id, an id prefix (`c0bca7db`), a name (`web`) or `namespace/name`.
@@ -258,7 +263,8 @@ All errors share one shape:
 | HTTP | `code` | When |
 | --- | --- | --- |
 | 400 | `INVALID_INPUT` | Bad request body or query, or Kubernetes rejected the object |
-| 404 | `NOT_FOUND` | No managed deployment with that id |
+| 400 | `LOGS_UNAVAILABLE` | The pod's container has not started (e.g. ImagePullBackOff), so Kubernetes has no logs |
+| 404 | `NOT_FOUND` | No managed deployment with that id (or pod not part of it, or no pods for logs) |
 | 409 | `CONFLICT` | Name already exists in that namespace |
 | 500 | `KUBERNETES_ERROR` | Kubernetes API error (forbidden, quota, server error), with its message |
 | 500 | `KUBERNETES_UNREACHABLE` | API server cannot be reached |
@@ -331,6 +337,7 @@ app/
   service.py       business logic: build Deployment, resolve id, assemble status
   convert.py       Kubernetes objects -> API responses
   health.py        aggregated health rules
+  logs.py          merges pod log streams into one text stream
   k8s_gateway.py   the only code that calls the Kubernetes API
   errors.py        error types and the error JSON shape
   constants.py     labels, annotation, limits

@@ -22,6 +22,18 @@ def _matches(labels: dict | None, selector: str) -> bool:
     return True
 
 
+class FakeLogStream:
+    def __init__(self, lines: list[str]):
+        self._lines = lines
+        self.closed = False
+
+    def lines(self):
+        yield from self._lines
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeGateway:
     def __init__(self):
         self.namespaces: set[str] = {"default"}
@@ -29,6 +41,10 @@ class FakeGateway:
         self.pods: list[V1Pod] = []
         self.deleted: list[tuple[str, str]] = []
         self.patches: list[tuple[str, str, dict]] = []
+        self.logs: dict[str, list[str]] = {}               # pod name -> log lines
+        self.log_errors: dict[str, Exception] = {}         # pod name -> error when opening its log
+        self.log_calls: list[tuple[str, str, bool, int]] = []
+        self.opened_logs: list["FakeLogStream"] = []
         self.fail_with: Exception | None = None  # set to simulate API failures
 
     def _maybe_fail(self):
@@ -97,6 +113,15 @@ class FakeGateway:
             for p in self.pods
             if (namespace is None or p.metadata.namespace == namespace) and _matches(p.metadata.labels, label_selector)
         ]
+
+    def open_pod_log(self, namespace: str, pod: str, follow: bool, tail_lines: int) -> "FakeLogStream":
+        self._maybe_fail()
+        self.log_calls.append((namespace, pod, follow, tail_lines))
+        if pod in self.log_errors:
+            raise self.log_errors[pod]
+        stream = FakeLogStream(self.logs.get(pod, []))
+        self.opened_logs.append(stream)
+        return stream
 
     # ---- test helpers ----
     def stored(self, namespace: str, name: str) -> V1Deployment:

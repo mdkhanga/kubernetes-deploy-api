@@ -3,7 +3,6 @@
 Run:  uvicorn app.main:app --port 8090 --reload      (Swagger UI at /docs)
 """
 
-import json
 import logging
 
 from fastapi import FastAPI, Request
@@ -12,21 +11,13 @@ from kubernetes.client.exceptions import ApiException
 from kubernetes.config import ConfigException
 from urllib3.exceptions import HTTPError as Urllib3HTTPError
 
-from app.errors import AppError, error_response
+from app.errors import AppError, error_response, kubernetes_message
 from app.k8s_gateway import Gateway, KubernetesGateway
 from app.models import ErrorDetail
 from app.routes import router
 from app.service import DeploymentService
 
 log = logging.getLogger("deploy-api")
-
-
-def _k8s_message(exc: ApiException) -> str:
-    """The API server puts a human-readable reason in the JSON body's 'message'."""
-    try:
-        return json.loads(exc.body).get("message") or exc.reason
-    except (TypeError, ValueError, AttributeError):
-        return exc.reason or str(exc)
 
 
 def create_app(gateway: Gateway | None = None) -> FastAPI:
@@ -59,7 +50,7 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
 
     @app.exception_handler(ApiException)
     async def on_kubernetes_error(request: Request, exc: ApiException):
-        message = _k8s_message(exc)
+        message = kubernetes_message(exc)
         if exc.status == 404:
             return error_response(404, "NOT_FOUND", message)
         if exc.status == 409:

@@ -58,6 +58,8 @@ class FakeApi:
             (request.method, request.url.path),
             (404, {"error": {"code": "NOT_FOUND", "message": "Deployment not found", "details": []}}),
         )
+        if isinstance(body, str):
+            return httpx.Response(status, text=body)
         return httpx.Response(status, json=body)
 
     def last(self, method: str) -> httpx.Request:
@@ -168,6 +170,22 @@ def test_restart_calls_restart_endpoint(fake):
     result = run("restart", "web")
     assert result.exit_code == 0
     assert fake.last("POST").url.path == f"/api/deployments/{WEB_ID}/restart"
+
+
+def test_logs_prints_lines_and_sends_options(fake):
+    fake.routes[("GET", f"/api/deployments/{WEB_ID}/logs")] = (200, "web-a | started\nweb-a | GET / 200\n")
+    result = run("logs", "web", "--pod", "web-a", "--follow", "--tail", "20")
+    assert result.exit_code == 0, result.output
+    assert "web-a | started" in result.output and "web-a | GET / 200" in result.output
+    params = fake.last("GET").url.params
+    assert (params["pod"], params["follow"], params["tail"]) == ("web-a", "true", "20")
+
+
+def test_logs_api_error_is_printed(fake):
+    fake.routes[("GET", f"/api/deployments/{WEB_ID}/logs")] = (400, {"error": {
+        "code": "LOGS_UNAVAILABLE", "message": "container is waiting to start", "details": []}})
+    result = run("logs", "web")
+    assert result.exit_code == 1 and "LOGS_UNAVAILABLE" in result.output
 
 
 def test_delete_asks_for_confirmation_and_aborts_on_no(fake):
