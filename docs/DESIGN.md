@@ -51,7 +51,12 @@ reads it live.
 | 19 | **Pod errors make a deployment FAILING even if old pods still serve** | A broken release should be loud, not hidden as DEGRADED | DEGRADED while capacity remains |
 | 20 | **Fresh start (`ContainerCreating`) is PROGRESSING, not FAILING** | "No replicas ready" only means failure once the rollout has settled | Literal "0 ready = FAILING" |
 | 21 | **Gateway interface + in-memory FakeGateway for tests** | Endpoint tests run in under a second with no cluster; failures (403, 500, unreachable) are easy to simulate | envtest / kind in CI (slower) |
-| 22 | **CLI calls the REST API**, not Kubernetes directly | One place for Kubernetes logic; the CLI is a UI for the service | CLI with its own client |
+| 22 | **CLI calls the REST API**, not Kubernetes directly; lives in `cli/` of the same repo but never imports `app/` | One place for Kubernetes logic; the CLI is a UI for the service and could be split out unchanged | CLI with its own client; separate repo |
+| 23 | **CLI = Typer + Rich, installed as `deploy`** via `pyproject.toml` console script | Subcommands from function signatures; colored tables; built-in confirm prompt; matches the spec's `deploy ...` examples | argparse + plain print |
+| 24 | **CLI references: full id, id prefix, name, or namespace/name**, resolved client-side from the list; ambiguity is an error | UIDs are long to type; names are friendlier; never guess between matches | Full id only |
+| 25 | **CLI `--watch` refreshes every 5s** (Rich Live) on `list` and `status` | Spec's auto-refresh requirement, applied to the CLI | Manual re-run |
+| 26 | **CLI exit codes: 0 ok, 1 API error/not found, 2 usage error/unreachable**; API errors printed with code and field details | Scriptable (smoke test) and readable | Always 1 |
+| 27 | **CLI tests use `httpx.MockTransport`** | Exercise real request bodies and output without a server | Mocking the Api class |
 
 ## Health rules (first match wins)
 

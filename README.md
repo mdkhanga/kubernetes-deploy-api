@@ -1,11 +1,24 @@
 # deploy-api
 
-A REST service that creates, manages and monitors Kubernetes Deployments on a real
-cluster. Every read comes live from the Kubernetes API; nothing is cached.
+A REST service and a CLI that create, manage and monitor Kubernetes Deployments on a
+real cluster. Every read comes live from the Kubernetes API; nothing is cached.
 
 - **API:** FastAPI + the official Kubernetes Python client
+- **CLI:** `deploy` (Typer + Rich), a terminal UI that calls the API
 - **Health:** each deployment gets `HEALTHY`, `DEGRADED`, `FAILING`, `PROGRESSING` or `UNKNOWN`, with a reason
 - **Design and decisions:** see [docs/DESIGN.md](docs/DESIGN.md)
+
+## Quick start
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && pip install -e .
+uvicorn app.main:app --port 8090 --reload          # terminal 1
+
+deploy create --name web --image nginx:latest -n dev -r 3     # terminal 2
+deploy list --watch
+deploy status web
+```
 
 ## Status
 
@@ -14,7 +27,8 @@ cluster. Every read comes live from the Kubernetes API; nothing is cached.
 | Create, list, get, delete deployments | Done |
 | Deployment and pod-level status, aggregated health | Done |
 | PATCH (scale, image) and rollout restart | Done |
-| CLI (`deploy create/list/status/scale/restart/delete`) | Next |
+| CLI (`deploy create/list/status/scale/set-image/restart/delete`) | Done |
+| `deploy logs` (stretch) | Planned |
 
 ## Prerequisites
 
@@ -32,6 +46,7 @@ ServiceAccount when run inside a pod.
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -e .          # installs the `deploy` CLI command
 ```
 
 ## Run
@@ -57,7 +72,45 @@ uvicorn app.main:app --port 8090 --reload
 
 `{id}` is the Deployment's Kubernetes **UID**, returned by create and list.
 
-## Walkthrough against a cluster
+## CLI
+
+The `deploy` command is a UI for the REST API (it only talks HTTP to it).
+Start the API first, then:
+
+```bash
+deploy create --name web --image nginx:latest -n dev -r 3 --port 80
+deploy create --name broken --image nginx:nonexistent -n dev -r 2
+deploy list                     # table with color-coded health
+deploy list -n dev --wide       # namespace filter + health reason
+deploy list --watch             # refresh every 5s (Ctrl+C to stop)
+deploy status broken            # replicas, conditions, pods with container states
+deploy status web --watch
+deploy scale web --replicas 5
+deploy set-image web --image nginx:1.27
+deploy restart web
+deploy delete broken            # asks for confirmation (--yes to skip)
+```
+
+| Command | Purpose |
+| --- | --- |
+| `create --name --image [-n NS] [-r N] [--port] [--cpu-request] [--memory-request] [--cpu-limit] [--memory-limit] [-e K=V]... [-l K=V]... [--command "..."] [--arg A]...` | Create a deployment |
+| `list [-n NS] [--wide] [--watch]` | All deployments with health (green HEALTHY, yellow DEGRADED, blue PROGRESSING, red FAILING) |
+| `status REF [--watch]` | Detail: health + reason, replica counts, conditions, pod table |
+| `scale REF --replicas N` | Scale |
+| `set-image REF --image IMG` | Rolling update to a new image |
+| `restart REF` | Rollout restart |
+| `delete REF [--yes]` | Delete with confirmation |
+
+- `REF` can be the full id, an id prefix (`c0bca7db`), a name (`web`) or `namespace/name`.
+  Ambiguous references are rejected with the list of matches.
+- API location: `--api-url` or `DEPLOY_API_URL` (default `http://localhost:8090`).
+- Exit codes: `0` success, `1` API error or not found, `2` usage error or API unreachable.
+- Without `pip install -e .`, use `python -m cli.deploy ...`.
+
+## Walkthrough against a cluster (REST API with curl)
+
+Each step below has a CLI equivalent in the [CLI](#cli) section, e.g. step 3 is
+`deploy create --name broken --image nginx:nonexistent -n dev -r 2` and step 4 is `deploy status broken`.
 
 Set variables on their own line. `ID=x curl .../$ID` on one line does **not**
 work: the shell expands `$ID` before the assignment applies.
@@ -251,6 +304,7 @@ Foreground delete) using mocks.
 | `tests/test_api.py` | Every endpoint, status code and error shape (FakeGateway) |
 | `tests/test_health.py` | Aggregated health rules, one named case per scenario |
 | `tests/test_gateway.py` | Real gateway call details, with the Kubernetes client mocked |
+| `tests/test_cli.py` | CLI commands, request bodies, output, prompts, exit codes (mocked HTTP) |
 
 ## Project layout
 
@@ -266,6 +320,9 @@ app/
   k8s_gateway.py   the only code that calls the Kubernetes API
   errors.py        error types and the error JSON shape
   constants.py     labels, annotation, limits
+cli/
+  deploy.py        `deploy` CLI (Typer + Rich), calls the REST API
 tests/             pytest suites + FakeGateway
+pyproject.toml     package metadata + `deploy` console script
 docs/DESIGN.md     design choices and decisions
 ```
