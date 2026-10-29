@@ -4,6 +4,7 @@ from datetime import datetime
 
 from kubernetes.client import V1ContainerStatus, V1Deployment, V1Pod
 
+from app.constants import RESTARTED_AT_ANNOTATION
 from app.health import compute_health
 from app.models import (
     Condition,
@@ -104,6 +105,15 @@ def pod_status(p: V1Pod) -> PodStatus:
     )
 
 
+def restarted_at(d: V1Deployment) -> datetime | None:
+    annotations = (d.spec.template.metadata.annotations if d.spec.template.metadata else None) or {}
+    value = annotations.get(RESTARTED_AT_ANNOTATION)
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
 def to_summary(d: V1Deployment, pods: list[V1Pod]) -> DeploymentSummary:
     health, health_reason = compute_health(d, pods)
     return DeploymentSummary(
@@ -118,6 +128,7 @@ def to_summary(d: V1Deployment, pods: list[V1Pod]) -> DeploymentSummary:
         conditions=conditions(d),
         created_at=d.metadata.creation_timestamp,
         last_updated_at=last_updated_at(d),
+        restarted_at=restarted_at(d),
     )
 
 

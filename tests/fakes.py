@@ -28,6 +28,7 @@ class FakeGateway:
         self.deployments: dict[tuple[str, str], V1Deployment] = {}
         self.pods: list[V1Pod] = []
         self.deleted: list[tuple[str, str]] = []
+        self.patches: list[tuple[str, str, dict]] = []
         self.fail_with: Exception | None = None  # set to simulate API failures
 
     def _maybe_fail(self):
@@ -59,6 +60,28 @@ class FakeGateway:
             for (ns, _), d in self.deployments.items()
             if (namespace is None or ns == namespace) and _matches(d.metadata.labels, label_selector)
         ]
+
+    def patch_deployment(self, namespace: str, name: str, patch: dict) -> V1Deployment:
+        """Applies the subset of strategic merge patch the service sends:
+        replicas, container image (matched by name), pod template annotations."""
+        self._maybe_fail()
+        if (namespace, name) not in self.deployments:
+            raise ApiException(status=404, reason="Not Found")
+        self.patches.append((namespace, name, copy.deepcopy(patch)))
+        d = self.deployments[(namespace, name)]
+        spec = patch.get("spec", {})
+        if "replicas" in spec:
+            d.spec.replicas = spec["replicas"]
+        template = spec.get("template", {})
+        for change in template.get("spec", {}).get("containers", []):
+            for c in d.spec.template.spec.containers:
+                if c.name == change["name"]:
+                    c.image = change["image"]
+        annotations = template.get("metadata", {}).get("annotations")
+        if annotations:
+            d.spec.template.metadata.annotations = {**(d.spec.template.metadata.annotations or {}), **annotations}
+        d.metadata.generation += 1
+        return copy.deepcopy(d)
 
     def delete_deployment(self, namespace: str, name: str) -> None:
         self._maybe_fail()

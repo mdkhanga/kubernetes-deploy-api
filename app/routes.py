@@ -11,6 +11,7 @@ from app.models import (
     DeploymentList,
     ErrorDetail,
     ErrorResponse,
+    PatchDeploymentRequest,
 )
 from app.service import DeploymentService
 
@@ -45,6 +46,19 @@ def list_deployments(
 @router.get("/{deployment_id}", response_model=DeploymentDetail, responses=ERRORS)
 def get_deployment(deployment_id: str, service: DeploymentService = Depends(get_service)):
     return service.get(deployment_id)
+
+
+@router.patch("/{deployment_id}", response_model=DeploymentDetail, responses=ERRORS)
+def update_deployment(
+    deployment_id: str, body: PatchDeploymentRequest, service: DeploymentService = Depends(get_service)
+):
+    return service.update(deployment_id, body)
+
+
+@router.post("/{deployment_id}/restart", status_code=status.HTTP_202_ACCEPTED,
+             response_model=DeploymentDetail, responses=ERRORS)
+def restart_deployment(deployment_id: str, service: DeploymentService = Depends(get_service)):
+    return service.restart(deployment_id)
 
 
 @router.delete("/{deployment_id}", status_code=status.HTTP_202_ACCEPTED, response_model=DeleteResponse, responses=ERRORS)

@@ -13,11 +13,16 @@ from kubernetes.client.exceptions import ApiException
 # Fail fast with a clear 500 instead of hanging when the API server is unreachable.
 REQUEST_TIMEOUT_SECONDS = 10
 
+# This client version defaults PATCH to JSON Patch (a list of operations); we send
+# dicts, so ask for a strategic merge patch explicitly (what kubectl uses).
+STRATEGIC_MERGE_PATCH = "application/strategic-merge-patch+json"
+
 
 class Gateway(Protocol):
     def ensure_namespace(self, name: str) -> None: ...
     def create_deployment(self, namespace: str, body: V1Deployment) -> V1Deployment: ...
     def list_deployments(self, namespace: str | None, label_selector: str) -> list[V1Deployment]: ...
+    def patch_deployment(self, namespace: str, name: str, patch: dict) -> V1Deployment: ...
     def delete_deployment(self, namespace: str, name: str) -> None: ...
     def list_pods(self, namespace: str | None, label_selector: str) -> list[V1Pod]: ...
 
@@ -77,6 +82,12 @@ class KubernetesGateway:
                 label_selector=label_selector, _request_timeout=REQUEST_TIMEOUT_SECONDS
             )
         return result.items
+
+    def patch_deployment(self, namespace: str, name: str, patch: dict) -> V1Deployment:
+        # Applied atomically by the API server: no read-modify-write, no conflict retries.
+        return self.apps.patch_namespaced_deployment(
+            name, namespace, patch, _content_type=STRATEGIC_MERGE_PATCH, _request_timeout=REQUEST_TIMEOUT_SECONDS
+        )
 
     def delete_deployment(self, namespace: str, name: str) -> None:
         # Foreground: Kubernetes deletes the owned ReplicaSets and Pods first

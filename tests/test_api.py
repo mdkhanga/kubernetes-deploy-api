@@ -175,6 +175,71 @@ def test_get_unknown_id_returns_404(api):
     assert r.json()["error"]["code"] == "NOT_FOUND"
 
 
+# ---------- PATCH /api/deployments/{id} ----------
+
+def test_patch_scales_replicas(api, gateway):
+    dep_id = create(api).json()["id"]
+    r = api.patch(f"/api/deployments/{dep_id}", json={"replicas": 5})
+    assert r.status_code == 200
+    assert r.json()["replicas"]["desired"] == 5
+    assert gateway.stored("dev", "web").spec.replicas == 5
+
+
+def test_patch_scale_to_zero(api, gateway):
+    dep_id = create(api).json()["id"]
+    assert api.patch(f"/api/deployments/{dep_id}", json={"replicas": 0}).status_code == 200
+    assert gateway.stored("dev", "web").spec.replicas == 0
+
+
+def test_patch_image_changes_only_the_image(api, gateway):
+    dep_id = create(api).json()["id"]
+    r = api.patch(f"/api/deployments/{dep_id}", json={"image": "nginx:1.27"})
+    assert r.status_code == 200 and r.json()["image"] == "nginx:1.27"
+    _, _, patch = gateway.patches[-1]
+    # Strategic merge patch: container matched by name, replicas untouched.
+    assert patch == {"spec": {"template": {"spec": {"containers": [{"name": "web", "image": "nginx:1.27"}]}}}}
+    assert gateway.stored("dev", "web").spec.replicas == 3
+
+
+def test_patch_scale_and_image_together(api, gateway):
+    dep_id = create(api).json()["id"]
+    api.patch(f"/api/deployments/{dep_id}", json={"replicas": 2, "image": "nginx:1.27"})
+    d = gateway.stored("dev", "web")
+    assert d.spec.replicas == 2 and d.spec.template.spec.containers[0].image == "nginx:1.27"
+    assert len(gateway.patches) == 1  # one atomic patch
+
+
+@pytest.mark.parametrize("body", [{}, {"replicas": -1}, {"replicas": 101}, {"image": "Bad Image"}, {"name": "x"}])
+def test_patch_invalid_returns_400(api, body):
+    dep_id = create(api).json()["id"]
+    r = api.patch(f"/api/deployments/{dep_id}", json=body)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_INPUT"
+
+
+def test_patch_unknown_id_returns_404(api):
+    assert api.patch("/api/deployments/nope", json={"replicas": 2}).status_code == 404
+
+
+# ---------- POST /api/deployments/{id}/restart ----------
+
+def test_restart_sets_the_pod_template_annotation(api, gateway):
+    dep_id = create(api).json()["id"]
+    r = api.post(f"/api/deployments/{dep_id}/restart")
+    assert r.status_code == 202
+    annotations = gateway.stored("dev", "web").spec.template.metadata.annotations
+    stamp = annotations["kubectl.kubernetes.io/restartedAt"]
+    assert r.json()["restarted_at"] is not None
+    assert stamp.endswith("+00:00")  # RFC 3339 UTC timestamp
+    # Only the pod template annotation is patched: nothing else changes.
+    _, _, patch = gateway.patches[-1]
+    assert list(patch["spec"]) == ["template"] and list(patch["spec"]["template"]) == ["metadata"]
+
+
+def test_restart_unknown_id_returns_404(api):
+    assert api.post("/api/deployments/nope/restart").status_code == 404
+
+
 # ---------- DELETE /api/deployments/{id} ----------
 
 def test_delete_returns_202_and_removes_deployment(api, gateway):

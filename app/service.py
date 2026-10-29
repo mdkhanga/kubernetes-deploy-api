@@ -3,6 +3,8 @@
 No state is stored here: every call reads the current state from the cluster.
 """
 
+from datetime import datetime, timezone
+
 from kubernetes.client import (
     V1Container,
     V1ContainerPort,
@@ -17,11 +19,17 @@ from kubernetes.client import (
 )
 from kubernetes.client.exceptions import ApiException
 
-from app.constants import MANAGED_BY_LABEL, MANAGED_BY_VALUE, NAME_LABEL
+from app.constants import MANAGED_BY_LABEL, MANAGED_BY_VALUE, NAME_LABEL, RESTARTED_AT_ANNOTATION
 from app.convert import to_detail, to_summary
 from app.errors import ConflictError, NotFoundError
 from app.k8s_gateway import Gateway
-from app.models import CreateDeploymentRequest, DeleteResponse, DeploymentDetail, DeploymentSummary
+from app.models import (
+    CreateDeploymentRequest,
+    DeleteResponse,
+    DeploymentDetail,
+    DeploymentSummary,
+    PatchDeploymentRequest,
+)
 
 MANAGED_SELECTOR = f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"
 
@@ -96,6 +104,30 @@ class DeploymentService:
     def get(self, deployment_id: str) -> DeploymentDetail:
         d = self._find(deployment_id)
         return to_detail(d, self.gateway.list_pods(d.metadata.namespace, pod_selector(d)))
+
+    def update(self, deployment_id: str, req: PatchDeploymentRequest) -> DeploymentDetail:
+        """Scale and/or change the image. An image change alters the pod template,
+        so the Deployment controller performs a rolling update."""
+        d = self._find(deployment_id)
+        spec: dict = {}
+        if req.replicas is not None:
+            spec["replicas"] = req.replicas
+        if req.image is not None:
+            # Strategic merge matches containers by name, so only the image changes.
+            container = d.spec.template.spec.containers[0].name
+            spec["template"] = {"spec": {"containers": [{"name": container, "image": req.image}]}}
+        return self._patch(d, {"spec": spec})
+
+    def restart(self, deployment_id: str) -> DeploymentDetail:
+        """Same as `kubectl rollout restart`: stamp the pod template with the current
+        time; the template changed, so the controller rolls out fresh pods."""
+        d = self._find(deployment_id)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return self._patch(d, {"spec": {"template": {"metadata": {"annotations": {RESTARTED_AT_ANNOTATION: now}}}}})
+
+    def _patch(self, d: V1Deployment, patch: dict) -> DeploymentDetail:
+        updated = self.gateway.patch_deployment(d.metadata.namespace, d.metadata.name, patch)
+        return to_detail(updated, self.gateway.list_pods(updated.metadata.namespace, pod_selector(updated)))
 
     def delete(self, deployment_id: str) -> DeleteResponse:
         d = self._find(deployment_id)

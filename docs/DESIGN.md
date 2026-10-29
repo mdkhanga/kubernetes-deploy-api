@@ -28,7 +28,7 @@ reads it live.
 
 | # | Decision | Why | Alternatives considered |
 | --- | --- | --- | --- |
-| 1 | **Python 3.12, FastAPI, official `kubernetes` client** | Readable; pydantic validation and Swagger docs for free; mature client where dict patches and `ApiException.status` are simple | Go + client-go (more verbose), TypeScript + client-node (patch content-type and error unwrapping friction) |
+| 1 | **Python 3.12, FastAPI, official `kubernetes` client** | Readable; pydantic validation and Swagger docs for free; mature official client with simple error handling (`ApiException.status`) | Go + client-go (more verbose), TypeScript + client-node (error unwrapping friction). Note: patch content-type must be set explicitly in this client too (see 15a) |
 | 2 | **No cache or database** | The spec requires live status; the API server is already the database | Informer cache (faster, but adds staleness and complexity) |
 | 3 | **`id` = Deployment UID** | Spec returns the UID on create; globally unique; a deleted-then-recreated deployment gets a new id | `namespace/name` (cheaper lookup, but not what the spec hints at) |
 | 4 | **UID lookup = list managed deployments across namespaces, match UID** | The API has no "get by UID"; one live call is fine at this scale | Encoding namespace in the id |
@@ -43,6 +43,8 @@ reads it live.
 | 13 | **Kubernetes error mapping:** 404→404, 409→409, 400/422→400, others→500 with the API server's message | "Meaningful message" for 500s, e.g. the forbidden or quota text | Generic 500 |
 | 14 | **10s timeout on every Kubernetes call** | An unreachable API server returns a clear 500 instead of hanging | Client defaults |
 | 15 | **Credentials: in-cluster first, then kubeconfig**, loaded lazily | Same code runs locally and in a pod; importing the app needs no cluster (tests) | Explicit flag |
+| 15a | **PATCH and restart send a strategic merge patch** (content-type set explicitly) | Applied atomically by the API server, so no read-modify-write and no conflict retries; containers are matched by name, so only the image changes. Same mechanism as `kubectl scale`, `set image`, `rollout restart`. The v37 Python client defaults PATCH to JSON Patch, so the content-type must be explicit (pinned by a test) | GET + PUT with retry on 409 conflict |
+| 15b | **Restart = `kubectl.kubernetes.io/restartedAt` annotation on the pod template**, returns 202 | Identical to `kubectl rollout restart`; changing the template triggers a normal rolling update | Deleting pods (no rolling guarantees) |
 | 16 | **DELETE uses `propagationPolicy: Foreground`**, returns 202 | Owned ReplicaSets and Pods are garbage-collected before the Deployment disappears; deletion is asynchronous | Background (Deployment vanishes first), Orphan |
 | 17 | **`last_updated_at` = newest of condition `lastUpdateTime` and `managedFields[].time`**, else creation time | Deployments have no "updated at" field; this covers both spec writes and status changes | Only creation time |
 | 18 | **Health is a pure function with ordered rules** returning status + reason | Easy to reason about and to test exhaustively; the reason explains the color | Logic spread across endpoints |
@@ -71,7 +73,7 @@ reads it live.
 - One container per Deployment (the request schema describes a single container).
 - No authentication on the API; access to the cluster is whatever the kubeconfig
   or ServiceAccount allows. In-cluster, the ServiceAccount needs: deployments
-  (get, list, create, update, patch, delete), pods (list), namespaces (get, create).
+  (list, create, patch, delete), pods (list), namespaces (get, create).
 - Replicas capped at 100 to catch typos; adjustable in `app/constants.py`.
 - UID lookup scans all managed deployments; fine for hundreds, would need an index
   (or a namespace in the id) for many thousands.

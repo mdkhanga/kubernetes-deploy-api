@@ -13,8 +13,8 @@ cluster. Every read comes live from the Kubernetes API; nothing is cached.
 | --- | --- |
 | Create, list, get, delete deployments | Done |
 | Deployment and pod-level status, aggregated health | Done |
-| PATCH (scale, image) and rollout restart | Next |
-| CLI (`deploy create/list/status/scale/restart/delete`) | Planned |
+| PATCH (scale, image) and rollout restart | Done |
+| CLI (`deploy create/list/status/scale/restart/delete`) | Next |
 
 ## Prerequisites
 
@@ -51,6 +51,8 @@ uvicorn app.main:app --port 8090 --reload
 | POST | `/api/deployments` | Create a Deployment (creates the namespace if needed) | 201 |
 | GET | `/api/deployments?namespace=<ns>` | List managed deployments, optional namespace filter | 200 |
 | GET | `/api/deployments/{id}` | Detail: replicas, conditions, pods, health | 200 |
+| PATCH | `/api/deployments/{id}` | Scale (`replicas`) and/or change `image` (rolling update) | 200 |
+| POST | `/api/deployments/{id}/restart` | Rollout restart, like `kubectl rollout restart` | 202 |
 | DELETE | `/api/deployments/{id}` | Delete with cascade (Foreground) | 202 |
 
 `{id}` is the Deployment's Kubernetes **UID**, returned by create and list.
@@ -144,7 +146,32 @@ Abridged response:
 }
 ```
 
-### 5. Errors
+### 5. Scale, change the image, restart
+
+```bash
+ID=<id of web>
+
+# Scale to 5
+curl -s -X PATCH localhost:8090/api/deployments/$ID -H 'Content-Type: application/json' \
+  -d '{"replicas": 5}' | python -m json.tool
+
+# New image: a rolling update (PROGRESSING, then HEALTHY)
+curl -s -X PATCH localhost:8090/api/deployments/$ID -H 'Content-Type: application/json' \
+  -d '{"image": "nginx:1.27"}' | python -m json.tool
+
+# Bad image onto the healthy deployment: old pods keep serving, health is FAILING
+curl -s -X PATCH localhost:8090/api/deployments/$ID -H 'Content-Type: application/json' \
+  -d '{"image": "nginx:nonexistent"}' | python -m json.tool
+
+# Rollout restart: new pods, same spec; restarted_at is set
+curl -s -X POST localhost:8090/api/deployments/$ID/restart | python -m json.tool
+kubectl get pods -n dev -w
+```
+
+PATCH body: `{"replicas": <0-100>}`, `{"image": "<image>"}`, or both (one atomic
+change). An empty body or unknown fields return 400.
+
+### 6. Errors
 
 ```bash
 # 409: same name in the same namespace
@@ -184,7 +211,7 @@ All errors share one shape:
 | 500 | `KUBERNETES_UNREACHABLE` | API server cannot be reached |
 | 500 | `INTERNAL_ERROR` | Unexpected error |
 
-### 6. Delete
+### 7. Delete
 
 ```bash
 curl -s -X DELETE localhost:8090/api/deployments/$BAD | python -m json.tool
@@ -214,7 +241,16 @@ pytest -v
 ```
 
 Tests run without a cluster: an in-memory fake replaces the Kubernetes gateway.
-They cover validation rules, every endpoint and error code, and the health rules.
+They cover validation rules, every endpoint and error code, the health rules, and
+the exact calls the real gateway makes (strategic merge patch content-type,
+Foreground delete) using mocks.
+
+| File | Covers |
+| --- | --- |
+| `tests/test_validation.py` | Input rules and request models |
+| `tests/test_api.py` | Every endpoint, status code and error shape (FakeGateway) |
+| `tests/test_health.py` | Aggregated health rules, one named case per scenario |
+| `tests/test_gateway.py` | Real gateway call details, with the Kubernetes client mocked |
 
 ## Project layout
 

@@ -192,6 +192,7 @@ class DeploymentSummary(BaseModel):
     conditions: list[Condition]
     created_at: datetime | None = None
     last_updated_at: datetime | None = None
+    restarted_at: datetime | None = Field(default=None, description="Last rollout restart, if any")
 
 
 class DeploymentDetail(DeploymentSummary):
